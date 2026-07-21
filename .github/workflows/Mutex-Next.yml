@@ -24,7 +24,7 @@ on:
           - KernelSU-Next
 
 env:
-  DEVICE: courbet_user
+  DEVICE: courbet
   KNAME: Mutex-LRU
   VAR: KSU
   ANYKERNEL_REPO: https://github.com/ZGSYet/AnyKernel3
