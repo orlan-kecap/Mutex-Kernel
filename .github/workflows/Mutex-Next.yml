@@ -11,7 +11,7 @@ on:
       branch:
         description: "Branch"
         required: true
-        default: "mutex"
+        default: "test"
         type: string
         
       ksu:
@@ -26,7 +26,7 @@ on:
 env:
   DEVICE: courbet
   KNAME: Mutex-LRU
-  VAR: KSU
+  VAR: AOSP
   ANYKERNEL_REPO: https://github.com/ZGSYet/AnyKernel3
   ANYKERNEL_BRANCH: master
   NEUTRON_URL: https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/10032024/neutron-clang-10032024.tar.zst
