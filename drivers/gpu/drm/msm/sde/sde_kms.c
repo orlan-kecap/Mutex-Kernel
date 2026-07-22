@@ -1,6 +1,6 @@
 /*
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2014-2021, The Linux Foundation. All rights reserved.
- * Copyright (C) 2021 XiaoMi, Inc.
  * Copyright (C) 2013 Red Hat
  * Author: Rob Clark <robdclark@gmail.com>
  *
@@ -82,7 +82,6 @@ static const char * const iommu_ports[] = {
 #define SDE_KMS_MODESET_LOCK_TIMEOUT_US 500
 #define SDE_KMS_MODESET_LOCK_MAX_TRIALS 20
 
-#define SDE_KMS_PM_QOS_CPU_DMA_LATENCY 300
 /**
  * sdecustom - enable certain driver customizations for sde clients
  *	Enabling this modifies the standard DRM behavior slightly and assumes
@@ -369,9 +368,32 @@ static void _sde_debugfs_destroy(struct sde_kms *sde_kms)
 static int sde_kms_enable_vblank(struct msm_kms *kms, struct drm_crtc *crtc)
 {
 	int ret = 0;
+	struct sde_kms *sde_kms;
+	struct msm_drm_private *priv;
+	struct sde_crtc *sde_crtc;
+	struct drm_encoder *drm_enc;
+
+	sde_kms = to_sde_kms(kms);
+	priv = sde_kms->dev->dev_private;
+	sde_crtc = to_sde_crtc(crtc);
 
 	SDE_ATRACE_BEGIN("sde_kms_enable_vblank");
+
+	if (sde_crtc->vblank_requested == false) {
+		SDE_ATRACE_BEGIN("sde_encoder_trigger_early_wakeup");
+		drm_for_each_encoder(drm_enc, crtc->dev)
+			sde_encoder_trigger_early_wakeup(drm_enc);
+
+		if (sde_kms->first_kickoff) {
+			sde_power_scale_reg_bus(&priv->phandle,
+					sde_kms->core_client,
+					VOTE_INDEX_HIGH, false);
+		}
+		SDE_ATRACE_END("sde_encoder_trigger_early_wakeup");
+	}
+
 	ret = sde_crtc_vblank(crtc, true);
+
 	SDE_ATRACE_END("sde_kms_enable_vblank");
 
 	return ret;
@@ -1053,11 +1075,7 @@ static void sde_kms_commit(struct msm_kms *kms,
 			sde_crtc_commit_kickoff(crtc, old_crtc_state);
 		}
 	}
-/*
-	for_each_crtc_in_state(old_state, crtc, old_crtc_state, i) {
-		sde_crtc_fod_ui_ready(crtc, old_crtc_state);
-	}
-*/
+
 	SDE_ATRACE_END("sde_kms_commit");
 }
 
@@ -1104,11 +1122,12 @@ void sde_kms_release_splash_resource(struct sde_kms *sde_kms,
 	/* remove the votes if all displays are done with splash */
 	if (!sde_kms->splash_data.num_splash_displays) {
 		for (i = 0; i < SDE_POWER_HANDLE_DBUS_ID_MAX; i++)
-			sde_power_data_bus_set_quota(&priv->phandle,
-					sde_kms->core_client,
-					SDE_POWER_HANDLE_DATA_BUS_CLIENT_RT, i,
-					SDE_POWER_HANDLE_ENABLE_BUS_AB_QUOTA,
-					SDE_POWER_HANDLE_ENABLE_BUS_IB_QUOTA);
+			if (sde_kms->perf.sde_rsc_available)
+				sde_power_data_bus_set_quota(&priv->phandle,
+						sde_kms->core_client,
+						SDE_POWER_HANDLE_DATA_BUS_CLIENT_RT, i,
+						SDE_POWER_HANDLE_ENABLE_BUS_AB_QUOTA,
+						SDE_POWER_HANDLE_ENABLE_BUS_IB_QUOTA);
 
 		sde_power_resource_enable(&priv->phandle,
 				sde_kms->core_client, false);
@@ -1144,9 +1163,7 @@ static void sde_kms_complete_commit(struct msm_kms *kms,
 	SDE_ATRACE_BEGIN("sde_kms_complete_commit");
 
 	for_each_crtc_in_state(old_state, crtc, old_crtc_state, i) {
-		SDE_ATRACE_BEGIN("sde_crtc_complete_commit");
 		sde_crtc_complete_commit(crtc, old_crtc_state);
-		SDE_ATRACE_END("sde_crtc_complete_commit");
 
 		/* complete secure transitions if any */
 		if (sde_kms->smmu_state.transition_type == POST_COMMIT)
@@ -1170,14 +1187,11 @@ static void sde_kms_complete_commit(struct msm_kms *kms,
 			SDE_EVT32(connector->base.id, c_conn->qsync_mode);
 		}
 
-		SDE_ATRACE_BEGIN("post_kickoff");
 		rc = c_conn->ops.post_kickoff(connector, &params);
-		SDE_ATRACE_END("post_kickoff");
 		if (rc) {
 			pr_err("Connector Post kickoff failed rc=%d\n",
 					 rc);
 		}
-		sde_connector_fod_notify(connector);
 	}
 
 	sde_power_resource_enable(&priv->phandle, sde_kms->core_client, false);
@@ -2030,25 +2044,17 @@ static int sde_kms_set_crtc_for_conn(struct drm_device *dev,
 	}
 
 	crtc_state = drm_atomic_get_crtc_state(state, enc->crtc);
-	if (IS_ERR(crtc_state)) {
-		SDE_ERROR("error %ld getting crtc %d state\n",
-				PTR_ERR(crtc_state), DRMID(conn));
-		return -EINVAL;
-	}
-
 	conn_state = drm_atomic_get_connector_state(state, conn);
 	if (IS_ERR(conn_state)) {
-		SDE_ERROR("error %ld getting connector %d state\n",
-				PTR_ERR(conn_state), DRMID(conn));
+		SDE_ERROR("error %d getting connector %d state\n",
+				ret, DRMID(conn));
 		return -EINVAL;
 	}
 
 	crtc_state->active = true;
 	ret = drm_atomic_set_crtc_for_connector(conn_state, enc->crtc);
-	if (ret) {
+	if (ret)
 		SDE_ERROR("error %d setting the crtc\n", ret);
-		return ret;
-	}
 
 	_sde_crtc_clear_dim_layers_v1(crtc_state);
 
@@ -2128,8 +2134,6 @@ static int _sde_kms_remove_fbs(struct sde_kms *sde_kms, struct drm_file *file,
 					crtc->state->encoder_mask)
 				ret = sde_kms_set_crtc_for_conn(
 					dev, drm_enc, state);
-				if (ret)
-					goto end;
 		}
 	}
 
@@ -2762,7 +2766,7 @@ static int sde_kms_get_mixer_count(const struct msm_kms *kms,
 			mode->hdisplay > max_mixer_width) {
 		*num_lm = 2;
 		if ((mode_clock_hz >> 1) > max_mdp_clock_hz) {
-			SDE_DEBUG("[%s] clock %lld exceeds max_mdp_clk %lld\n",
+			SDE_DEBUG("[%s] clock %d exceeds max_mdp_clk %d\n",
 					mode->name, mode_clock_hz,
 					max_mdp_clock_hz);
 			return -EINVAL;
@@ -2809,9 +2813,7 @@ retry:
 	if (ret)
 		goto end;
 
-	ret = drm_atomic_commit(state);
-	if (ret)
-		SDE_ERROR("error %d committing state for connector\n", ret);
+	drm_atomic_commit(state);
 end:
 	if (state)
 		drm_atomic_state_put(state);
@@ -3212,17 +3214,6 @@ static void _sde_kms_set_lutdma_vbif_remap(struct sde_kms *sde_kms)
 	sde_vbif_set_qos_remap(sde_kms, &qos_params);
 }
 
-static void kms_update_pm_qos(struct pm_qos_request *pm_qos_irq_req, bool enable)
-{
-	if (!pm_qos_request_active(pm_qos_irq_req))
-		return;
-
-	if (enable)
-		pm_qos_update_request(pm_qos_irq_req, SDE_KMS_PM_QOS_CPU_DMA_LATENCY);
-	else
-		pm_qos_update_request(pm_qos_irq_req, PM_QOS_DEFAULT_VALUE);
-}
-
 static void sde_kms_handle_power_event(u32 event_type, void *usr)
 {
 	struct sde_kms *sde_kms = usr;
@@ -3241,9 +3232,7 @@ static void sde_kms_handle_power_event(u32 event_type, void *usr)
 		sde_kms_init_shared_hw(sde_kms);
 		_sde_kms_set_lutdma_vbif_remap(sde_kms);
 		sde_kms->first_kickoff = true;
-		kms_update_pm_qos(&sde_kms->pm_qos_irq_req, true);
 	} else if (event_type == SDE_POWER_EVENT_PRE_DISABLE) {
-		kms_update_pm_qos(&sde_kms->pm_qos_irq_req, false);
 		sde_irq_update(msm_kms, false);
 		sde_kms->first_kickoff = false;
 	}
@@ -3640,7 +3629,7 @@ static int sde_kms_hw_init(struct msm_kms *kms)
 	sde_kms->hw_sid = sde_hw_sid_init(sde_kms->sid,
 				sde_kms->sid_len, sde_kms->catalog);
 	if (IS_ERR(sde_kms->hw_sid)) {
-		SDE_ERROR("failed to init sid %ld\n", PTR_ERR(sde_kms->hw_sid));
+		SDE_ERROR("failed to init sid %d\n", PTR_ERR(sde_kms->hw_sid));
 		sde_kms->hw_sid = NULL;
 		goto power_error;
 	}
@@ -3698,12 +3687,6 @@ static int sde_kms_hw_init(struct msm_kms *kms)
 		sde_power_resource_enable(&priv->phandle,
 						sde_kms->core_client, false);
 	}
-
-	sde_kms->pm_qos_irq_req.type = PM_QOS_REQ_AFFINE_IRQ;
-	sde_kms->pm_qos_irq_req.irq = platform_get_irq(to_platform_device(sde_kms->dev->dev), 0);
-	pm_qos_add_request(&sde_kms->pm_qos_irq_req, PM_QOS_CPU_DMA_LATENCY,
-					SDE_KMS_PM_QOS_CPU_DMA_LATENCY);
-
 	return 0;
 
 genpd_err:
@@ -3776,4 +3759,30 @@ int sde_kms_handle_recovery(struct drm_encoder *encoder)
 {
 	SDE_EVT32(DRMID(encoder), MSM_ENC_ACTIVE_REGION);
 	return sde_encoder_wait_for_event(encoder, MSM_ENC_ACTIVE_REGION);
+}
+
+void sde_kms_trigger_early_wakeup(struct sde_kms *sde_kms,
+		struct drm_crtc *crtc)
+{
+	struct msm_drm_private *priv;
+	struct drm_encoder *drm_enc;
+
+	if (!sde_kms || !crtc) {
+		SDE_ERROR("invalid argument sde_kms %pK crtc %pK\n",
+			sde_kms, crtc);
+		return;
+	}
+
+	priv = sde_kms->dev->dev_private;
+
+	SDE_ATRACE_BEGIN("sde_kms_trigger_early_wakeup");
+	drm_for_each_encoder_mask(drm_enc, crtc->dev, crtc->state->encoder_mask)
+		sde_encoder_trigger_early_wakeup(drm_enc);
+
+	if (sde_kms->first_kickoff) {
+		sde_power_scale_reg_bus(&priv->phandle,
+				sde_kms->core_client,
+				VOTE_INDEX_HIGH, false);
+	}
+	SDE_ATRACE_END("sde_kms_trigger_early_wakeup");
 }
