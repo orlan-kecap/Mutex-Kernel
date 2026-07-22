@@ -13,6 +13,7 @@ DEVICE="courbet"
 KNAME="Deandless-Road"
 VAR="KSU"
 ZIPNAME="${KNAME}-${VAR}.zip"
+CLANG_DIR="/mnt/d/pt/kernel/linux-x86/clang+llvm-14.0.0-x86_64-linux-gnu-ubuntu-18.04/bin"
 ANYKERNEL_REPO="https://github.com/ZGSYet/AnyKernel3"
 ANYKERNEL_BRANCH="master"
 
@@ -26,6 +27,7 @@ DTB="$OUT/arch/arm64/boot/dtb.img"
 export ARCH=arm64
 export KBUILD_BUILD_USER=PryL
 export KBUILD_BUILD_HOST=TUF-FA5093
+export PATH="$CLANG_DIR:$PATH"
 
 SECONDS=0
 DATE=$(date +"%d %B %Y")
@@ -135,7 +137,7 @@ Applying ${DEVICE}_defconfig
 \`\`\`
 ⏳ delok konfigurasi kernel..."
 
-make O="$OUT" ARCH=arm64 "vendor/${DEVICE}_defconfig"
+make O="$OUT" ARCH=arm64 vendor/courbet_defconfig
 
 # ── Step 3: Compile ──────────────────────────────────────────────
 echo "[3/4] Compiling kernel..."
@@ -156,21 +158,13 @@ Compiler : Clang + GCC
 🔥 Gas poll compilenya, tenang ae cok"
 
 make -j$(nproc --all) \
-            O=out \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE="$CROSS_COMPILE_PREFIX" \
-            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32_PREFIX" \
-            2>&1 | tee build.log
+    O="$OUT" \
+    ARCH=arm64 \
+    LLVM=1 \
+    LLVM_IAS=1 \
+    CROSS_COMPILE=aarch64-linux-gnu- \
+    CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+    2>&1 | tee build.log
 
 # ── Cek Hasil Compile ────────────────────────────────────────────
 if [ ! -f "$KERNEL" ]; then
