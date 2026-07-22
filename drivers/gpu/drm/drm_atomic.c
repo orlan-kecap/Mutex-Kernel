@@ -30,6 +30,9 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_mode.h>
 #include <drm/drm_print.h>
+#include <linux/cpu_input_boost.h>
+#include <linux/devfreq_boost.h>
+#include <linux/pm_qos.h>
 #include <linux/sync_file.h>
 
 #include "drm_crtc_internal.h"
@@ -2204,8 +2207,12 @@ static void complete_crtc_signaling(struct drm_device *dev,
 	kfree(fence_state);
 }
 
-int drm_mode_atomic_ioctl(struct drm_device *dev,
-			  void *data, struct drm_file *file_priv)
+#ifdef CONFIG_KPROFILES
+extern int kp_active_mode(void);
+#endif
+
+static int __drm_mode_atomic_ioctl(struct drm_device *dev, void *data,
+				   struct drm_file *file_priv)
 {
 	struct drm_mode_atomic *arg = data;
 	uint32_t __user *objs_ptr = (uint32_t __user *)(unsigned long)(arg->objs_ptr);
@@ -2246,6 +2253,33 @@ int drm_mode_atomic_ioctl(struct drm_device *dev,
 	if ((arg->flags & DRM_MODE_ATOMIC_TEST_ONLY) &&
 			(arg->flags & DRM_MODE_PAGE_FLIP_EVENT))
 		return -EINVAL;
+
+	if (!(arg->flags & DRM_MODE_ATOMIC_TEST_ONLY)) {
+#ifdef CONFIG_KPROFILES
+		switch (kp_active_mode()) {
+		case 0:
+		case 2:
+			if (cpu_input_boost_within_input(3250))
+				cpu_input_boost_kick();
+
+			if (df_boost_within_input(3250))
+				devfreq_boost_kick(DEVFREQ_CPU_LLCC_DDR_BW);
+			break;
+		case 3:
+			cpu_input_boost_kick();
+			devfreq_boost_kick(DEVFREQ_CPU_LLCC_DDR_BW);
+			break;
+		default:
+			break;
+		}
+#else
+		if (cpu_input_boost_within_input(3250))
+			cpu_input_boost_kick();
+
+		if (df_boost_within_input(3250))
+			devfreq_boost_kick(DEVFREQ_CPU_LLCC_DDR_BW);
+#endif
+	}
 
 	drm_modeset_acquire_init(&ctx, 0);
 
@@ -2368,6 +2402,28 @@ out:
 
 	drm_modeset_drop_locks(&ctx);
 	drm_modeset_acquire_fini(&ctx);
+
+	return ret;
+}
+
+int drm_mode_atomic_ioctl(struct drm_device *dev, void *data,
+			  struct drm_file *file_priv)
+{
+	/*
+	 * Optimistically assume the current task won't migrate to another CPU
+	 * and restrict the current CPU to shallow idle states so that it won't
+	 * take too long to finish running the ioctl whenever the ioctl runs a
+	 * command that sleeps, such as for an "atomic" commit.
+	 */
+	struct pm_qos_request req = {
+		.type = PM_QOS_REQ_AFFINE_CORES,
+		.cpus_affine = ATOMIC_INIT(BIT(raw_smp_processor_id()))
+	};
+	int ret;
+
+	pm_qos_add_request(&req, PM_QOS_CPU_DMA_LATENCY, 100);
+	ret = __drm_mode_atomic_ioctl(dev, data, file_priv);
+	pm_qos_remove_request(&req);
 
 	return ret;
 }

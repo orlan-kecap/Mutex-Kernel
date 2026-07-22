@@ -59,10 +59,9 @@ static int ttm_bo_vm_fault_idle(struct ttm_buffer_object *bo,
 
 	/*
 	 * If possible, avoid waiting for GPU with mmap_sem
-	 * held.  We only do this if the fault allows retry and this
-	 * is the first attempt.
+	 * held.
 	 */
-	if (fault_flag_allow_retry_first(vmf->flags)) {
+	if (vmf->flags & FAULT_FLAG_ALLOW_RETRY) {
 		ret = VM_FAULT_RETRY;
 		if (vmf->flags & FAULT_FLAG_RETRY_NOWAIT)
 			goto out_unlock;
@@ -123,12 +122,7 @@ static int ttm_bo_vm_fault(struct vm_fault *vmf)
 		if (ret != -EBUSY)
 			return VM_FAULT_NOPAGE;
 
-		/*
-		 * If the fault allows retry and this is the first
-		 * fault attempt, we try to release the mmap_sem
-		 * before waiting
-		 */
-		if (fault_flag_allow_retry_first(vmf->flags)) {
+		if (vmf->flags & FAULT_FLAG_ALLOW_RETRY) {
 			if (!(vmf->flags & FAULT_FLAG_RETRY_NOWAIT)) {
 				ttm_bo_reference(bo);
 				up_read(&vmf->vma->vm_mm->mmap_sem);
